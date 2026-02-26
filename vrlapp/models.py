@@ -24,7 +24,7 @@ class CustomerProfile(models.Model):
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=100, default="Tamil Nadu")
     pincode = models.CharField(max_length=6)
-    email_verified = models.BooleanField(default=False, help_text="Email verification status")
+    email_verified = models.BooleanField(default=True, help_text="Email verification status")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -114,13 +114,20 @@ class PickupRequest(models.Model):
 class RequestStatusHistory(models.Model):
     """Track status changes for audit trail"""
     
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('completed', 'Completed'),
+    ]
+    
     pickup_request = models.ForeignKey(
         PickupRequest,
         on_delete=models.CASCADE,
         related_name='status_history'
     )
-    old_status = models.CharField(max_length=20, null=True, blank=True)
-    new_status = models.CharField(max_length=20)
+    old_status = models.CharField(max_length=20, null=True, blank=True, choices=STATUS_CHOICES)
+    new_status = models.CharField(max_length=20, choices=STATUS_CHOICES)
     changed_at = models.DateTimeField(auto_now_add=True)
     changed_by = models.ForeignKey(
         User,

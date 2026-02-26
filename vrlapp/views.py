@@ -47,14 +47,8 @@ def register(request):
                 except Exception as e:
                     print(f"Error sending welcome email: {str(e)}")
                 
-                # Send email verification email
-                try:
-                    send_verification_email(user, user.email)
-                except Exception as e:
-                    print(f"Error sending verification email: {str(e)}")
-                
-                messages.success(request, f'Welcome {user.first_name}! Please verify your email to continue.')
-                return redirect('verify_email_page')
+                messages.success(request, f'Welcome {user.first_name}! You can now submit pickup requests.')
+                return redirect('pickup_request')
             except Exception as e:
                 messages.error(request, f'Registration failed: {str(e)}')
         else:
@@ -126,18 +120,15 @@ def user_logout(request):
 def pickup_request(request):
     """Pickup request submission form"""
     
-    # Check if email is verified
+    # Check if authenticated
+    if not request.user.is_authenticated:
+        return redirect('user_login')
+    
     try:
         profile = request.user.customer_profile
-        if not profile.email_verified:
-            messages.warning(
-                request,
-                '⚠️ Please verify your email first! Check your inbox for verification link.'
-            )
-            return redirect('verify_email_page')
     except CustomerProfile.DoesNotExist:
-        messages.warning(request, 'Please complete your profile first.')
-        return redirect('home')
+        messages.error(request, 'Please register first to submit pickup requests.')
+        return redirect('register')
     
     if request.method == 'POST':
         form = PickupRequestForm(request.POST)
@@ -198,6 +189,7 @@ def pickup_request(request):
         'form': form,
         'page_title': 'Submit Pickup Request - VRL Logistics',
         'user': request.user,
+        'is_authenticated': request.user.is_authenticated,
     }
     return render(request, 'pickup.html', context)
 
@@ -231,6 +223,8 @@ def pickup_detail(request, pickup_id):
         'pickup': pickup,
         'status_history': status_history,
         'page_title': f'Request #{pickup.id} Details - VRL Logistics',
+        'user': request.user,
+        'is_authenticated': request.user.is_authenticated,
     }
     return render(request, 'pickup_detail.html', context)
 
@@ -392,6 +386,155 @@ def reject_request(request, pickup_id):
         return redirect('admin_dashboard')
 
 
+@login_required(login_url='user_login')
+@require_http_methods(["POST"])
+def complete_request(request, pickup_id):
+    """Mark a pickup request as completed"""
+    if not request.user.is_staff:
+        return redirect('home')
+    
+    pickup = get_object_or_404(PickupRequest, id=pickup_id)
+    
+    try:
+        old_status = pickup.status
+        pickup.status = 'completed'
+        pickup.completed_at = now()
+        pickup.save()
+        
+        # Create status history
+        RequestStatusHistory.objects.create(
+            pickup_request=pickup,
+            old_status=old_status,
+            new_status='completed',
+            changed_by=request.user,
+            notes='Marked as completed'
+        )
+        
+        messages.success(request, f'Pickup request #{pickup_id} has been completed.')
+        return redirect('admin_dashboard')
+    
+    except Exception as e:
+        messages.error(request, f'Error completing request: {str(e)}')
+        return redirect('admin_dashboard')
+
+
+@login_required(login_url='user_login')
+@require_http_methods(["GET"])
+def admin_accept_request(request, pickup_id):
+    """Admin panel button to accept a pickup request"""
+    if not request.user.is_staff:
+        messages.error(request, 'You do not have permission to perform this action.')
+        return redirect('home')
+    
+    pickup = get_object_or_404(PickupRequest, id=pickup_id)
+    
+    try:
+        old_status = pickup.status
+        pickup.status = 'accepted'
+        pickup.reviewed_at = now()
+        pickup.save()
+        
+        # Create status history
+        RequestStatusHistory.objects.create(
+            pickup_request=pickup,
+            old_status=old_status,
+            new_status='accepted',
+            changed_by=request.user,
+            notes='Accepted via admin panel button'
+        )
+        
+        # Send acceptance email
+        try:
+            if send_acceptance_email(pickup):
+                messages.success(request, f'✅ Request #{pickup_id} accepted and email sent to customer.')
+            else:
+                messages.warning(request, f'✅ Request #{pickup_id} accepted but email sending failed.')
+        except Exception as e:
+            messages.warning(request, f'✅ Request #{pickup_id} accepted but email error: {str(e)}')
+        
+        # Redirect back to admin change form
+        return redirect(f'/admin/vrlapp/pickuprequest/{pickup_id}/change/')
+    
+    except Exception as e:
+        messages.error(request, f'Error accepting request: {str(e)}')
+        return redirect(f'/admin/vrlapp/pickuprequest/{pickup_id}/change/')
+
+
+@login_required(login_url='user_login')
+@require_http_methods(["GET"])
+def admin_reject_request(request, pickup_id):
+    """Admin panel button to reject a pickup request"""
+    if not request.user.is_staff:
+        messages.error(request, 'You do not have permission to perform this action.')
+        return redirect('home')
+    
+    pickup = get_object_or_404(PickupRequest, id=pickup_id)
+    
+    try:
+        old_status = pickup.status
+        pickup.status = 'rejected'
+        pickup.reviewed_at = now()
+        pickup.admin_notes = 'Rejected via admin panel button'
+        pickup.save()
+        
+        # Create status history
+        RequestStatusHistory.objects.create(
+            pickup_request=pickup,
+            old_status=old_status,
+            new_status='rejected',
+            changed_by=request.user,
+            notes='Rejected via admin panel button'
+        )
+        
+        # Send rejection email
+        try:
+            if send_rejection_email(pickup):
+                messages.success(request, f'❌ Request #{pickup_id} rejected and email sent to customer.')
+            else:
+                messages.warning(request, f'❌ Request #{pickup_id} rejected but email sending failed.')
+        except Exception as e:
+            messages.warning(request, f'❌ Request #{pickup_id} rejected but email error: {str(e)}')
+        
+        return redirect(f'/admin/vrlapp/pickuprequest/{pickup_id}/change/')
+    
+    except Exception as e:
+        messages.error(request, f'Error rejecting request: {str(e)}')
+        return redirect(f'/admin/vrlapp/pickuprequest/{pickup_id}/change/')
+
+
+@login_required(login_url='user_login')
+@require_http_methods(["GET"])
+def admin_complete_request(request, pickup_id):
+    """Admin panel button to mark pickup request as completed"""
+    if not request.user.is_staff:
+        messages.error(request, 'You do not have permission to perform this action.')
+        return redirect('home')
+    
+    pickup = get_object_or_404(PickupRequest, id=pickup_id)
+    
+    try:
+        old_status = pickup.status
+        pickup.status = 'completed'
+        pickup.completed_at = now()
+        pickup.save()
+        
+        # Create status history
+        RequestStatusHistory.objects.create(
+            pickup_request=pickup,
+            old_status=old_status,
+            new_status='completed',
+            changed_by=request.user,
+            notes='Marked as completed via admin panel button'
+        )
+        
+        messages.success(request, f'🎉 Request #{pickup_id} marked as completed.')
+        return redirect(f'/admin/vrlapp/pickuprequest/{pickup_id}/change/')
+    
+    except Exception as e:
+        messages.error(request, f'Error completing request: {str(e)}')
+        return redirect(f'/admin/vrlapp/pickuprequest/{pickup_id}/change/')
+
+
 # Email Helper Functions
 
 def send_welcome_email(user):
@@ -424,34 +567,50 @@ VRL Logistics Team
             [user.email],
             fail_silently=False,
         )
+        print(f"[SUCCESS] Welcome email sent to {user.email}")
+        return True
     except Exception as e:
-        print(f"Failed to send welcome email: {str(e)}")
+        print(f"[ERROR] Failed to send welcome email: {str(e)}")
+        return False
 
 
 def send_customer_request_email(pickup):
     """Send confirmation email to customer when request is submitted"""
-    subject = f'Pickup Request Received - Request #{pickup.id}'
-    email_body = f"""
-Dear {pickup.full_name},
+    subject = f'Pickup Request Received - Request #{pickup.id} - VRL Logistics'
+    status_display = dict(PickupRequest.STATUS_CHOICES).get(pickup.status, pickup.status)
+    
+    email_body = f"""Dear {pickup.full_name},
 
-Thank you for submitting your parcel pickup request with VRL Logistics.
+Thank you for submitting your parcel pickup request with VRL Logistics!
 
-REQUEST DETAILS:
-Request ID: {pickup.id}
-Submitted on: {pickup.requested_at.strftime('%Y-%m-%d %H:%M')}
-Status: {pickup.get_status_display()}
+📋 REQUEST CONFIRMATION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Request ID: #{pickup.id}
+Submitted: {pickup.requested_at.strftime('%d-%m-%Y at %H:%M')}
+Status: ⏳ {status_display}
 
-PICKUP INFORMATION:
-Address: {pickup.address}, {pickup.city}, {pickup.state} {pickup.pincode}
-Preferred Date: {pickup.preferred_pickup_date}
-Preferred Time: {pickup.preferred_pickup_time}
-Weight: {pickup.parcel_weight}
+📦 PICKUP INFORMATION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Pickup Address: {pickup.address}, {pickup.city}, {pickup.state} {pickup.pincode}
+Preferred Date: {pickup.preferred_pickup_date.strftime('%d-%m-%Y')}
+Preferred Time: {pickup.preferred_pickup_time.strftime('%H:%M')}
+Parcel Weight: {pickup.parcel_weight}
 
-Your request is currently pending review. Our admin team will review your request shortly and notify you of approval or if any additional information is needed.
+📝 DESCRIPTION:
+{pickup.parcel_description}
+
+⏱️ NEXT STEPS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Our admin team will review your request
+2. You'll receive an acceptance or rejection email
+3. If accepted, we'll confirm the exact pickup time
+4. Keep your contact information handy
+
+❓ QUESTIONS?
+Contact us at: support@vrllogistics.com
 
 Best regards,
-VRL Logistics Team
-"""
+VRL Logistics Team"""
     
     try:
         send_mail(
@@ -461,8 +620,12 @@ VRL Logistics Team
             [pickup.email],
             fail_silently=False,
         )
+        print(f"[SUCCESS] Customer request email sent to {pickup.email}")
+        return True
     except Exception as e:
-        print(f"Failed to send customer request email: {str(e)}")
+        print(f"[ERROR] Failed to send customer request email: {str(e)}")
+        print(f"[ERROR] Email config - Host: {settings.EMAIL_HOST}, Port: {settings.EMAIL_PORT}")
+        return False
 
 
 def send_admin_notification_email(pickup):
@@ -506,10 +669,13 @@ VRL Logistics System
                 fail_silently=False,
             )
             print(f"[SUCCESS] Admin notification email sent to {len(admin_emails)} admin(s): {admin_emails}")
+            return True
         else:
             print("[WARNING] No active admin users with email addresses found")
+            return False
     except Exception as e:
         print(f"[ERROR] Failed to send admin notification email: {str(e)}")
+        return False
 
 
 def send_acceptance_email(pickup):
@@ -610,6 +776,7 @@ Invoice attached: See attachment below
         email_sent = True
         
         print(f"[SUCCESS] Acceptance email with invoice sent successfully to {pickup.email}")
+        return email_sent
         
     except Exception as e:
         print(f"[ERROR] Error sending acceptance email with invoice: {str(e)}")
@@ -669,117 +836,13 @@ VRL Logistics Team
             [pickup.email],
             fail_silently=False,
         )
-    except Exception as e:
-        print(f"Failed to send rejection email: {str(e)}")
-
-
-def send_verification_email(user, email):
-    """Send email verification link"""
-    # Create verification token
-    token = EmailVerification.generate_token()
-    
-    verification = EmailVerification.objects.create(
-        user=user,
-        email=email,
-        token=token
-    )
-    
-    # Build verification link
-    verification_link = f"{settings.SITE_URL}/verify-email/{token}/"
-    
-    subject = 'VRL Logistics - Verify Your Email Address'
-    email_body = f"""
-Dear {user.first_name},
-
-Thank you for registering with VRL Logistics!
-
-To complete your email verification and start submitting pickup requests, please click the link below:
-
-VERIFICATION LINK:
-{verification_link}
-
-This link will expire in 24 hours.
-
-If you did not create this account, please ignore this email.
-
-Best regards,
-VRL Logistics Team
-"""
-    
-    try:
-        send_mail(
-            subject,
-            email_body,
-            settings.EMAIL_HOST_USER,
-            [email],
-            fail_silently=False,
-        )
-        print(f"[SUCCESS] Verification email sent to {email}")
+        print(f"[SUCCESS] Rejection email sent to {pickup.email}")
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to send verification email: {str(e)}")
+        print(f"[ERROR] Failed to send rejection email: {str(e)}")
         return False
 
 
-@require_http_methods(["GET"])
-def verify_email(request, token):
-    """Verify email with token"""
-    try:
-        verification = EmailVerification.objects.get(token=token)
-        
-        if verification.is_verified:
-            messages.info(request, 'This email has already been verified.')
-            return redirect('home')
-        
-        if verification.is_token_expired():
-            messages.error(
-                request,
-                'Verification link has expired. Please request a new verification email.'
-            )
-            return redirect('verify_email_page')
-        
-        # Verify the email
-        if verification.verify():
-            messages.success(
-                request,
-                '✅ Email verified successfully! You can now submit pickup requests.'
-            )
-            return redirect('pickup_request')
-        else:
-            messages.error(request, 'Email verification failed.')
-            return redirect('home')
-    
-    except EmailVerification.DoesNotExist:
-        messages.error(request, 'Invalid verification link.')
-        return redirect('home')
-    except Exception as e:
-        messages.error(request, f'Error verifying email: {str(e)}')
-        return redirect('home')
 
-
-@login_required(login_url='user_login')
-@require_http_methods(["GET", "POST"])
-def verify_email_page(request):
-    """Send verification email page"""
-    if request.method == 'POST':
-        try:
-            # Send verification email
-            if send_verification_email(request.user, request.user.email):
-                messages.success(
-                    request,
-                    '📧 Verification email sent! Check your inbox for the verification link.'
-                )
-            else:
-                messages.error(request, 'Failed to send verification email. Please try again.')
-        except Exception as e:
-            messages.error(request, f'Error: {str(e)}')
-        
-        return redirect('verify_email_page')
-    
-    context = {
-        'page_title': 'Verify Email - VRL Logistics',
-        'email': request.user.email,
-    }
-    return render(request, 'verify_email.html', context)
 
 

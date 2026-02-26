@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from django.contrib import messages
+from django.utils.timezone import now
 from .models import CustomerProfile, PickupRequest, RequestStatusHistory, Invoice, EmailVerification
 from .views import send_acceptance_email, send_rejection_email
 
@@ -43,7 +44,7 @@ class PickupRequestAdmin(admin.ModelAdmin):
     list_display = ['request_id', 'get_customer_name', 'get_status_colored', 'preferred_pickup_date', 'requested_at']
     list_filter = ['status', 'requested_at', 'preferred_pickup_date', 'city', 'state']
     search_fields = ['full_name', 'email', 'phone_number', 'address']
-    readonly_fields = ['customer', 'requested_at', 'reviewed_at', 'completed_at', 'updated_at', 'id']
+    readonly_fields = ['customer', 'requested_at', 'reviewed_at', 'completed_at', 'updated_at', 'id', 'get_action_buttons_form']
     date_hierarchy = 'requested_at'
     actions = ['mark_as_accepted', 'mark_as_rejected', 'mark_as_completed']
     
@@ -66,6 +67,10 @@ class PickupRequestAdmin(admin.ModelAdmin):
         ('Admin Notes', {
             'fields': ('admin_notes',),
             'classes': ('wide',)
+        }),
+        ('Actions', {
+            'fields': ('get_action_buttons_form',),
+            'description': 'Click buttons below to change request status and send email to customer'
         }),
         ('Timestamps', {
             'fields': ('completed_at', 'updated_at'),
@@ -99,6 +104,42 @@ class PickupRequestAdmin(admin.ModelAdmin):
         )
     get_status_colored.short_description = "Status"
     
+    def get_action_buttons_form(self, obj):
+        """Display action buttons in detail form view"""
+        if not obj.pk:
+            return "—"
+        
+        buttons = []
+        
+        if obj.status == 'pending':
+            accept_url = f"/admin/vrlapp/pickuprequest/{obj.id}/accept_request/"
+            reject_url = f"/admin/vrlapp/pickuprequest/{obj.id}/reject_request/"
+            
+            buttons.append(
+                f'<a class="button" style="background-color: #28a745; color: white; padding: 10px 20px; margin-right: 10px; text-decoration: none; border-radius: 4px;" '
+                f'href="{accept_url}" '
+                f'onclick="return confirm(\'Accept this request and send acceptance email with invoice to customer?\')">✅ ACCEPT & SEND EMAIL</a>'
+            )
+            buttons.append(
+                f'<a class="button" style="background-color: #dc3545; color: white; padding: 10px 20px; margin-right: 10px; text-decoration: none; border-radius: 4px;" '
+                f'href="{reject_url}" '
+                f'onclick="return confirm(\'Reject this request and send rejection email to customer?\')">❌ REJECT & SEND EMAIL</a>'
+            )
+        
+        if obj.status == 'accepted':
+            complete_url = f"/admin/vrlapp/pickuprequest/{obj.id}/complete_request/"
+            buttons.append(
+                f'<a class="button" style="background-color: #17a2b8; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;" '
+                f'href="{complete_url}" '
+                f'onclick="return confirm(\'Mark as completed?\')">🎉 MARK COMPLETE</a>'
+            )
+        
+        if not buttons:
+            return format_html('<span style="color: #999;">No actions available for this status</span>')
+        
+        return format_html('<div style="margin-top: 10px;">{}</div>'.format(' '.join(buttons)))
+    get_action_buttons_form.short_description = ""
+    
     def mark_as_accepted(self, request, queryset):
         """Admin action to mark requests as accepted and send acceptance emails"""
         count = 0
@@ -106,7 +147,7 @@ class PickupRequestAdmin(admin.ModelAdmin):
         for pickup in queryset:
             old_status = pickup.status
             pickup.status = 'accepted'
-            pickup.reviewed_at = __import__('django.utils.timezone', fromlist=['now']).now()
+            pickup.reviewed_at = now()
             pickup.save()
             
             # Create status history
@@ -137,7 +178,7 @@ class PickupRequestAdmin(admin.ModelAdmin):
         for pickup in queryset:
             old_status = pickup.status
             pickup.status = 'rejected'
-            pickup.reviewed_at = __import__('django.utils.timezone', fromlist=['now']).now()
+            pickup.reviewed_at = now()
             pickup.admin_notes = 'Rejected via admin bulk action'
             pickup.save()
             
@@ -168,7 +209,7 @@ class PickupRequestAdmin(admin.ModelAdmin):
         for pickup in queryset:
             old_status = pickup.status
             pickup.status = 'completed'
-            pickup.completed_at = __import__('django.utils.timezone', fromlist=['now']).now()
+            pickup.completed_at = now()
             pickup.save()
             
             # Create status history
@@ -212,12 +253,14 @@ class RequestStatusHistoryAdmin(admin.ModelAdmin):
         """Display old status"""
         if not obj.old_status:
             return "—"
-        return obj.get_old_status_display() if hasattr(obj, 'get_old_status_display') else obj.old_status
+        status_map = {'pending': '⏳ Pending', 'accepted': '✅ Accepted', 'rejected': '❌ Rejected', 'completed': '🎉 Completed'}
+        return status_map.get(obj.old_status, obj.old_status)
     old_status_display.short_description = "From"
     
     def new_status_display(self, obj):
         """Display new status"""
-        return obj.get_new_status_display() if hasattr(obj, 'get_new_status_display') else obj.new_status
+        status_map = {'pending': '⏳ Pending', 'accepted': '✅ Accepted', 'rejected': '❌ Rejected', 'completed': '🎉 Completed'}
+        return status_map.get(obj.new_status, obj.new_status)
     new_status_display.short_description = "To"
 
 @admin.register(Invoice)
